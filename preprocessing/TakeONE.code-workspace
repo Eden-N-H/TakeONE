@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "TakeONE",
+			"path": ".."
+		},
+		{
+			"name": "dataset",
+			"path": "../../Downloads/archive/dataset"
+		}
+	],
+	"settings": {}
+}
