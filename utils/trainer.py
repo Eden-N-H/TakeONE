@@ -1,7 +1,8 @@
 import torch
 from torch import optim, nn
 from torch.utils.data import DataLoader
-from .model_util import create_model, save_checkpoint, load_checkpoint
+from model_util import create_model, save_checkpoint, load_checkpoint
+
 
 # The Trainer class should be here, not in its own file
 class Trainer:

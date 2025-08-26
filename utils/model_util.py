@@ -1,16 +1,14 @@
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from model.edsr import EDSR
 import torch
 import os
 import torchvision.transforms as transforms
 import cv2 as cv
-from . import image_util
-from . import evaluation_util
+from utils import image_util
+from utils import evaluation_util
 import numpy as np
-from .trainer import Trainer # <--- I've added this line
-
-# The remaining functions from your previous model_util.py file
-# create_model, save_checkpoint, load_checkpoint, evaluate_model, enhance
-# all stay here. The 'train_model' function has been moved.
 
 
 def create_model(scale):
