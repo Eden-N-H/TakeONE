@@ -32,4 +32,3 @@ if __name__ == '__main__':
         checkpoint=False,
         checkpoint_load_path=None,
         cuda=False
-    )
