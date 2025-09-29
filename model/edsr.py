@@ -1,84 +1,100 @@
+import math
 import torch
-from torch import nn
+import torch.nn as nn
 
 
-class MeanShift(nn.Conv2d):
-    def __init__(self, rgb_range=255, rgb_mean=(0.4488, 0.4371, 0.4040), rgb_std=(1.0, 1.0, 1.0),
-                 sign=-1):
-        super(MeanShift, self).__init__(3, 3, kernel_size=1)
-        std = torch.Tensor(rgb_std)
-        self.weight.data = torch.eye(3).view(3, 3, 1, 1) / std.view(3, 1, 1, 1)
-        self.bias.data = sign * rgb_range * torch.Tensor(rgb_mean) / std
-        for p in self.parameters():
-            p.requires_grad = False
+class ResidualBlock(nn.Module):
+    """
+    Standard EDSR residual block without batch normalization.
+    Uses two 3×3 conv layers with ReLU in between and a residual scaling factor.
+    """
+    def __init__(self, num_channels, res_scale=0.1):
+        super().__init__()
+        self.res_scale = res_scale
 
+        self.conv1 = nn.Conv2d(num_channels, num_channels, kernel_size=3, stride=1,
+                               padding=1, bias=True)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(num_channels, num_channels, kernel_size=3, stride=1,
+                               padding=1, bias=True)
 
-class ResBlock(nn.Module):
-    def __init__(self, in_channel=256, out_channel=256, kernel_size=3, stride=1, padding=1,
-                 bias=True):
-        super(ResBlock, self).__init__()
-        layers = [nn.Conv2d(in_channel, out_channel, kernel_size=kernel_size, stride=stride,
-                            padding=padding, bias=bias),
-                  nn.ReLU(inplace=True),
-                  nn.Conv2d(in_channel, out_channel, kernel_size=kernel_size, stride=stride,
-                            padding=padding, bias=bias)]
-
-        self.body = nn.Sequential(*layers)
-        self.res_scale = 0.1
+        # Kaiming initialization for stability
+        nn.init.kaiming_normal_(self.conv1.weight, nonlinearity='relu')
+        nn.init.zeros_(self.conv1.bias)
+        nn.init.kaiming_normal_(self.conv2.weight, nonlinearity='relu')
+        nn.init.zeros_(self.conv2.bias)
 
     def forward(self, x):
-        res = self.body(x).mul(self.res_scale)
-        res += x
-        return res
+        residual = self.conv1(x)
+        residual = self.relu(residual)
+        residual = self.conv2(residual)
+        return x + residual * self.res_scale
 
 
 class Upsampler(nn.Sequential):
-    def __init__(self, scale):
-        layers = []
-        if scale == 2 or scale == 4:
-            layers.append(nn.Conv2d(256, 256 * 4, kernel_size=3, stride=1, padding=1, bias=True))
-            layers.append(nn.PixelShuffle(2))
-            if scale == 4:
-                layers.append(nn.Conv2d(256, 256 * 4, kernel_size=3, stride=1, padding=1,
-                                        bias=True))
-                layers.append(nn.PixelShuffle(2))
+    """
+    Upsampler using sub-pixel convolution (PixelShuffle).
+    Supports scale factors 2^n (e.g., 2, 4, 8).
+    """
+    def __init__(self, scale, n_feat):
+        m = []
+        if (scale & (scale - 1)) == 0:      # scale = 2^n
+            for _ in range(int(math.log(scale, 2))):
+                m.append(nn.Conv2d(n_feat, 4 * n_feat, 3, 1, 1))
+                m.append(nn.PixelShuffle(2))
+                m.append(nn.ReLU(inplace=True))
         elif scale == 3:
-            layers.append(nn.Conv2d(256, 256 * 9, kernel_size=3, stride=1, padding=1, bias=True))
-            layers.append(nn.PixelShuffle(3))
+            m.append(nn.Conv2d(n_feat, 9 * n_feat, 3, 1, 1))
+            m.append(nn.PixelShuffle(3))
+            m.append(nn.ReLU(inplace=True))
         else:
-            raise NotImplementedError
-
-        super(Upsampler, self).__init__(*layers)
+            raise ValueError(f"Unsupported scale: {scale}")
+        super().__init__(*m)
 
 
 class EDSR(nn.Module):
-    def __init__(self, scale):
-        super(EDSR, self).__init__()
+    """
+    Enhanced Deep Super-Resolution (EDSR) model.
 
-        head_layers = [nn.Conv2d(3, 256, kernel_size=3, stride=1, padding=1, bias=True)]
+    Args:
+        scale (int): Upscaling factor (e.g., 4 for x4 SR).
+        num_channels (int): Number of feature maps in each conv layer.
+        num_residual_blocks (int): Number of residual blocks.
+        in_channels (int): Number of input image channels (default 3 for RGB).
+        out_channels (int): Number of output image channels (default 3 for RGB).
+    """
+    def __init__(self, scale=4, num_channels=256, num_residual_blocks=32,
+                 in_channels=3, out_channels=3):
+        super().__init__()
 
-        body_layers = []
-        for _ in range(32):
-            body_layers.append(ResBlock())
-        body_layers.append(nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1, bias=True))
+        # Head: first conv
+        self.head = nn.Conv2d(in_channels, num_channels, kernel_size=3, stride=1,
+                              padding=1, bias=True)
 
-        tail_layers = [Upsampler(scale=scale),
-                       nn.Conv2d(256, 3, kernel_size=3, stride=1, padding=1, bias=True)]
+        # Body: N residual blocks + one conv
+        body = [ResidualBlock(num_channels) for _ in range(num_residual_blocks)]
+        body.append(nn.Conv2d(num_channels, num_channels, kernel_size=3, stride=1,
+                              padding=1, bias=True))
+        self.body = nn.Sequential(*body)
 
-        self.sub_mean = MeanShift(sign=-1)
-        self.add_mean = MeanShift(sign=1)
-        self.head = nn.Sequential(*head_layers)
-        self.body = nn.Sequential(*body_layers)
-        self.tail = nn.Sequential(*tail_layers)
+        # Upsampling
+        self.upsample = Upsampler(scale, num_channels)
+
+        # Tail: final conv
+        self.tail = nn.Conv2d(num_channels, out_channels, kernel_size=3, stride=1,
+                              padding=1, bias=True)
+
+        # Init head/tail
+        nn.init.kaiming_normal_(self.head.weight, nonlinearity='relu')
+        nn.init.zeros_(self.head.bias)
+        nn.init.kaiming_normal_(self.tail.weight, nonlinearity='relu')
+        nn.init.zeros_(self.tail.bias)
 
     def forward(self, x):
-        x = self.sub_mean(x)
+        # x expected range [0,1]
         x = self.head(x)
-
         res = self.body(x)
-        res += x
-
-        x = self.tail(res)
-        x = self.add_mean(x)
-
+        x = x + res  # global skip connection
+        x = self.upsample(x)
+        x = self.tail(x)
         return x
