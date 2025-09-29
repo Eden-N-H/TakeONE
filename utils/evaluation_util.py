@@ -1,108 +1,52 @@
-import cv2 as cv
+import torch
 import numpy as np
 import math
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-import image_util as util
+from skimage.metrics import peak_signal_noise_ratio as psnr_metric
+from skimage.metrics import structural_similarity as ssim_metric
 
 
-def get_psnr(img1, img2, shave_border=0, tensor=False):
+def tensor_to_numpy_img(tensor_img):
     """
-    compute the PSNR score between two images
-
-    :param img1: the first image
-    :param img2: the second image
-    :param shave_border: the amount of border to be shaved
-    :param tensor: flag indicating whether input images are tensor images or numpy images
-    :return: the PSNR score
+    Expect tensor_img in CxHxW with values in [0,1]. Returns HxWxC in uint8 [0,255].
     """
-    if tensor:
-        img1 = util.tensor_to_numpy(img1)
-    else:
-        img1 = img1.astype(int)
-
-    if tensor:
-        img2 = util.tensor_to_numpy(img2)
-    else:
-        img2 = img2.astype(int)
-
-    height, width = img1.shape[0:2]
-
-    # crop both images to the region we should focus on
-    img1 = img1[shave_border:height - shave_border,
-           shave_border:width - shave_border]
-    img2 = img2[shave_border:height - shave_border,
-           shave_border:width - shave_border]
-
-    im_dff = img1 - img2
-    rmse = math.sqrt(np.mean(im_dff ** 2))
-
-    if rmse == 0:
-        return 100
-    return 20 * math.log10(255.0 / rmse)
+    arr = tensor_img.detach().cpu().numpy().transpose(1, 2, 0)
+    arr = np.clip(arr, 0.0, 1.0)
+    return (arr * 255.0).astype(np.uint8)
 
 
-def ssim(img1, img2):
+def calc_psnr(img1, img2):
     """
-    helper function of get_ssim to compute the SSIM score of a single channel
+    Calculates the Peak Signal-to-Noise Ratio (PSNR) between two images.
+    A higher PSNR value indicates a higher-quality image reconstruction.
 
-    :param img1: the first image
-    :param img2: the second image
-    :return: SSIM score of a single channel
+    :param img1: The first image (e.g., ground truth HR image).
+    :param img2: The second image (e.g., predicted SR image).
+    :return: The calculated PSNR value.
     """
-    C1 = (0.01 * 255) ** 2
-    C2 = (0.03 * 255) ** 2
-
+    # Convert images to float64 to ensure precision during calculation
     img1 = img1.astype(np.float64)
     img2 = img2.astype(np.float64)
-    kernel = cv.getGaussianKernel(11, 1.5)
-    window = np.outer(kernel, kernel.transpose())
-
-    mu1 = cv.filter2D(img1, -1, window)[5:-5, 5:-5]  # valid
-    mu2 = cv.filter2D(img2, -1, window)[5:-5, 5:-5]
-    mu1_sq = mu1 ** 2
-    mu2_sq = mu2 ** 2
-    mu1_mu2 = mu1 * mu2
-    sigma1_sq = cv.filter2D(img1 ** 2, -1, window)[5:-5, 5:-5] - mu1_sq
-    sigma2_sq = cv.filter2D(img2 ** 2, -1, window)[5:-5, 5:-5] - mu2_sq
-    sigma12 = cv.filter2D(img1 * img2, -1, window)[5:-5, 5:-5] - mu1_mu2
-
-    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) *
-                                                            (sigma1_sq + sigma2_sq + C2))
-    return ssim_map.mean()
+    
+    # Calculate Mean Squared Error (MSE)
+    mse = np.mean((img1 - img2)**2)
+    if mse == 0:
+        return float('inf')
+    
+    # Calculate PSNR
+    return 10 * math.log10(255.0**2 / mse)
 
 
-def get_ssim(img1, img2, tensor=False):
-    """
-    compute the SSIM score between two images
+def calc_ssim(img1, img2, win_size=7):
+    # Determine the largest odd win_size that fits the image
+    h, w = img1.shape[:2]
+    max_win = min(h, w)
+    if max_win < win_size:
+        # ensure odd number >= 3
+        win_size = max(3, max_win if max_win % 2 == 1 else max_win - 1)
 
-    :param img1: the first image
-    :param img2: the second image
-    :param tensor: flag indicating whether input images are tensor images or numpy images
-    :return: the SSIM score
-    """
-    if tensor:
-        img1 = util.tensor_to_numpy(img1)
-    else:
-        img1 = img1.astype(int)
-
-    if tensor:
-        img2 = util.tensor_to_numpy(img2)
-    else:
-        img2 = img2.astype(int)
-
-    if not img1.shape == img2.shape:
-        raise ValueError('Input images must have the same dimensions.')
-    if img1.ndim == 2:  # in case both images are single-channel images
-        return ssim(img1, img2)
-    elif img1.ndim == 3:  # in case both images are multi-channel images
-        if img1.shape[2] == 3:  # for three-channel image
-            ssims = []
-            for i in range(3):
-                ssims.append(ssim(img1, img2))
-            return np.array(ssims).mean()
-        elif img1.shape[2] == 1:  # for single-channel image
-            return ssim(np.squeeze(img1), np.squeeze(img2))
-    else:
-        raise ValueError('Wrong input image dimensions.')
+    return ssim_metric(
+        img1, img2,
+        data_range=255,
+        channel_axis=-1,     # for color images (newer skimage)
+        win_size=win_size
+    )
