@@ -1,81 +1,85 @@
-import torch
+import torch.autograd
 from torch import optim, nn
 from torch.utils.data import DataLoader
-from model_util import create_model, save_checkpoint, load_checkpoint
+import sys
+import os
+import numpy as np
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Use relative imports, as this script is a module within a package
+from .model_util import save_model, load_model
+from .dataset import SRDataset
 
-
-# The Trainer class should be here, not in its own file
 class Trainer:
-    def __init__(self, dataset, model, cuda, lr=1e-4, batch_size=16):
-        self.dataset_ = dataset
-        self.cuda_ = cuda
-        self.model_ = model
-        self.step_ = 2e5
-        self.lr_ = lr
-        self.batch_size_ = batch_size
-        self.batch_update_ = 1
-        self.checkpoint_path_ = None
+    """
+    The Trainer class encapsulates the entire training loop for the EDSR model.
+    It handles data loading, model optimization, and checkpoint management.
+    """
+    def __init__(self, model, lr, batch_size, checkpoint_save_path, scale, lr_root, hr_root, cuda):
+        """
+        Initializes the Trainer with model, training parameters, and data paths.
+
+        :param model: The EDSR model instance.
+        :param lr: Learning rate for the optimizer.
+        :param batch_size: Batch size for the DataLoader.
+        :param checkpoint_save_path: Path to save model checkpoints.
+        :param scale: The super-resolution scale factor.
+        :param lr_root: The root directory for low-resolution images.
+        :param hr_root: The root directory for high-resolution images.
+        :param cuda: Boolean flag to enable GPU training.
+        """
+        self.model = model
+        self.lr = lr
+        self.batch_size = batch_size
+        self.checkpoint_save_path = checkpoint_save_path
+        self.cuda = cuda
         
-    #... rest of your Trainer class methods ...
+        # Load the dataset
+        self.dataset = SRDataset(lr_root=lr_root, hr_root=hr_root, scale=scale)
+        self.dataloader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
+        
+        # Define optimizer and loss function
+        self.optimizer = optim.Adam(
+            filter(lambda p: p.requires_grad, self.model.parameters()),
+            lr=self.lr,
+            betas=(0.9, 0.999),
+            eps=1e-08
+        )
+        self.criterion = nn.L1Loss()
+        
+        if self.cuda:
+            self.model.cuda()
+            self.criterion.cuda()
 
-    def set_checkpoint_saving_path(self, path):
-        self.checkpoint_path_ = path
+    def train(self, start_epoch, total_epochs):
+        """
+        Runs the training loop for a specified number of epochs.
 
-    def train(self, epoch, num_worker=1, weight_decay=1e-4, checkpoint_load_path=None,
-              checkpoint=False):
-        train_loader = DataLoader(self.dataset_, num_workers=num_worker,
-                                  batch_size=self.batch_size_, shuffle=True)
-        start_epoch = 0
-        if checkpoint:
-            self.model_, start_epoch, self.lr_, self.batch_update_, _ = \
-                load_checkpoint(self.model_, checkpoint_load_path)
-
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model_.parameters()),
-                               lr=self.lr_, weight_decay=weight_decay, betas=(0.9, 0.999),
-                               eps=1e-08)
-
-        criterion = nn.L1Loss()
-        if self.cuda_:
-            criterion = criterion.cuda()
-
-        print('training ...')
-        for epoch_i in range(start_epoch, start_epoch + epoch):
-            self.model_.train()
-            for i, (input_img, target_img) in enumerate(train_loader):
-                if self.batch_update_ % self.step_ == 0:
-                    self.lr_ /= 2
-                    optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                                  self.model_.parameters()),
-                                           lr=self.lr_, weight_decay=weight_decay,
-                                           betas=(0.9, 0.999), eps=1e-08)
-                input_img *= 255
-                target_img *= 255
-                if self.cuda_:
-                    input_img = input_img.cuda()
-                    target_img = target_img.cuda()
-                predict_img = self.model_(input_img)
-                target_img = torch.autograd.Variable(target_img, requires_grad=False)
-                loss = criterion(predict_img, target_img)
-                optimizer.zero_grad()
+        :param start_epoch: The epoch to start training from (for resuming).
+        :param total_epochs: The total number of epochs to train for.
+        """
+        print('Starting training...')
+        for epoch in range(start_epoch, total_epochs):
+            self.model.train()
+            
+            for i, (lr_img, hr_img) in enumerate(self.dataloader):
+                # Move images to GPU if cuda is enabled
+                if self.cuda:
+                    lr_img = lr_img.cuda()
+                    hr_img = hr_img.cuda()
+                
+                # Perform forward pass
+                sr_img = self.model(lr_img)
+                
+                
+                # Calculate loss
+                loss = self.criterion(sr_img, hr_img)
+                
+                # Zero out gradients, perform backpropagation, and update weights
+                self.optimizer.zero_grad()
                 loss.backward()
-                optimizer.step()
-                self.batch_update_ += 1
-                print('===> Epoch[{}/{}]({}/{}): Loss: {}'.format(epoch_i + 1, start_epoch + epoch,
-                                                                 i + 1, len(train_loader),
-                                                                 round(loss.item(), 4)))
-            save_checkpoint(model=self.model_, epoch=epoch_i + 1, lr=self.lr_,
-                            batch=self.batch_update_, path=self.checkpoint_path_)
-        save_checkpoint(model=self.model_, epoch=epoch, batch=self.batch_update_, lr=self.lr_,
-                        path=self.checkpoint_path_, final=True)
+                self.optimizer.step()
 
-# Now, we also need a function that is used to call the training logic
-def train_model(scale, train_dataset, epoch, lr, batch_size, checkpoint_save_path, checkpoint=False,
-                checkpoint_load_path=None, cuda=False):
-    print('initializing model ...')
-    sr_model = create_model(scale=scale)
-    if cuda:
-        sr_model.cuda()
-    trainer = Trainer(train_dataset, sr_model, cuda=cuda, lr=lr, batch_size=batch_size)
-    trainer.set_checkpoint_saving_path(checkpoint_save_path)
-    trainer.train(epoch=epoch, checkpoint_load_path=checkpoint_load_path,
-                  checkpoint=checkpoint)
+                print(f"Epoch [{epoch+1}/{total_epochs}], Batch [{i+1}/{len(self.dataloader)}], Loss: {loss.item():.4f}")
+
+            # Save model checkpoint after each epoch
+            save_model(self.model, self.optimizer, epoch + 1, self.checkpoint_save_path)
