@@ -48,6 +48,46 @@ def save_tensor_img(img, img_name, output_path):
     cv.imwrite(output_p, numpy_img)
 
 
+def make_lr_from_hr(hr_root, lr_output_path, scale):
+    """
+    Generates a low-resolution (LR) dataset from a high-resolution (HR) dataset.
+    The LR images are created using bicubic interpolation.
+
+    :param hr_root: The path to the raw high-resolution dataset directory.
+    :param lr_output_path: The desired output path for the new low-resolution images.
+    :param scale: The downsampling scale factor.
+    """
+    print(f'Generating low-resolution images with scale factor {scale}...')
+    hr_files = sorted(glob.glob(os.path.join(hr_root, '*')))
+    
+    if not os.path.exists(lr_output_path):
+        os.makedirs(lr_output_path)
+    
+    for file_path in hr_files:
+        try:
+            hr_img = cv.imread(file_path)
+            if hr_img is None:
+                print(f"Warning: Could not read image file {file_path}. Skipping.")
+                continue
+            
+            hr_height, hr_width, _ = hr_img.shape
+            lr_height, lr_width = hr_height // scale, hr_width // scale
+            
+            # Use bicubic interpolation for downsampling
+            lr_img = cv.resize(hr_img, (lr_width, lr_height), interpolation=cv.INTER_CUBIC)
+            
+            # Construct the new filename
+            base_name = os.path.basename(file_path)
+            lr_file_path = os.path.join(lr_output_path, base_name)
+            
+            cv.imwrite(lr_file_path, lr_img)
+        except Exception as e:
+            print(f"Error processing image {file_path}: {e}")
+            continue
+            
+    print('Low-resolution dataset generation complete.')
+
+
 def crop(lr_img, hr_img, data_type='tensor', hr_crop_size=192, scale=4):
     """
     crop the same region in low-resolution and high-resolution images
@@ -76,14 +116,14 @@ def crop(lr_img, hr_img, data_type='tensor', hr_crop_size=192, scale=4):
     # extract the corresponding cropped parts
     if data_type == 'tensor':
         lr_img_cropped = lr_img[:, lr_height:lr_height + lr_crop_size,
-                         lr_width:lr_width + lr_crop_size]
+                               lr_width:lr_width + lr_crop_size]
         hr_img_cropped = hr_img[:, hr_height:hr_height + hr_crop_size,
-                         hr_width:hr_width + hr_crop_size]
+                               hr_width:hr_width + hr_crop_size]
     elif data_type == 'array':
         lr_img_cropped = lr_img[lr_height:lr_height + lr_crop_size,
-                         lr_width:lr_width + lr_crop_size, :]
+                               lr_width:lr_width + lr_crop_size, :]
         hr_img_cropped = hr_img[hr_height:hr_height + hr_crop_size,
-                         hr_width:hr_width + hr_crop_size, :]
+                               hr_width:hr_width + hr_crop_size, :]
     else:
         raise NotImplementedError
 
@@ -178,8 +218,8 @@ def augment_image(train_img_file, target_img_file, train_output_path, target_out
                                                   train_img_file.split('/')[-1].split('\\')[-1]
                                                   .split('.')[0], i + 1)
             target_out = '{}/{}_aug_{}.png'.format(target_output_path,
-                                                   target_img_file.split('/')[-1].split('\\')[-1]
-                                                   .split('.')[0], i + 1)
+                                                  target_img_file.split('/')[-1].split('\\')[-1]
+                                                  .split('.')[0], i + 1)
             cv.imwrite(train_out, r_f_c_train)
             cv.imwrite(target_out, r_f_c_target)
 
@@ -197,8 +237,8 @@ def augment_dir(train_root, target_root, train_output_path, target_output_path, 
     :param hr_crop_size: the cropped size of the high resolution image
     :param scale: scale of the high-resolution image compared to the low-resolution image
     """
-    train_files = np.array(glob.glob(train_root + '/*'))
-    target_files = np.array(glob.glob(target_root + '/*'))
+    train_files = sorted(glob.glob(train_root + '/*'))
+    target_files = sorted(glob.glob(target_root + '/*'))
 
     if not os.path.exists(train_output_path):
         os.makedirs(train_output_path)
@@ -209,3 +249,15 @@ def augment_dir(train_root, target_root, train_output_path, target_output_path, 
         print('augmenting image {} ...'.format(i + 1))
         augment_image(train_files[i], target_files[i], train_output_path, target_output_path,
                       aug_num=aug_num, hr_crop_size=hr_crop_size, scale=scale)
+
+
+if __name__ == '__main__':
+    # Define your paths and scale factor
+    hr_path = './dataset/train/high_res'
+    lr_path = './dataset/train/low_res'
+    scale_factor = 4
+
+    # Run the function to generate the LR dataset
+    make_lr_from_hr(hr_path, lr_path, scale_factor)
+
+    print('Low-resolution images successfully generated!')
